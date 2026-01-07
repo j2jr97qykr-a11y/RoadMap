@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Interactive Roadmap – Plans</title>
+
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; max-width: 1050px; margin: auto; }
+    .card { border: 1px solid #ccc; border-radius: 12px; padding: 16px; margin-bottom: 12px; background: #fff; }
+    .btn { padding: 8px 14px; border: none; border-radius: 6px; cursor: pointer; margin-right: 6px; }
+    .btn-add { background: #007bff; color: white; }
+    .btn-dup { background: #6c757d; color: white; }
+    .btn-del { background: #dc3545; color: white; }
+    .btn-save { background: #28a745; color: white; }
+    .btn-deleteplan { background: #dc3545; color:white; }
+    .btn-export { background: #17a2b8; color:white; }
+    .btn-import { background: #6f42c1; color:white; }
+
+    .muted { color:#666; font-size:12px; }
+    .pill {
+      display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px;
+      border:1px solid #ddd; background:#f7f7f7; margin-left:6px;
+    }
+    .pill-ok { border-color:#28a74533; background:#28a74512; color:#1f7a34; }
+    .pill-bad { border-color:#dc354533; background:#dc354512; color:#a11f2d; }
+
+    .gantt-bar {
+      height: 20px;
+      border-radius: 6px;
+      display:flex;
+      align-items:center;
+      padding:0 6px;
+      box-sizing:border-box;
+    }
+    .gantt-bg {
+      background: #e2e2e2;
+      border-radius: 6px;
+      height: 26px;
+      position: relative;
+      margin-bottom: 6px;
+      overflow:hidden;
+    }
+    .draggable { cursor: grab; }
+
+    /* Critical highlight in Gantt (one global critical activity across selected plans) */
+    .critical-outline {
+      outline: 2px solid #000;
+      outline-offset: -2px;
+    }
+
+    .smallgrid {
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .field label { font-size:12px; font-weight:bold; display:block; margin-bottom:4px; }
+    input[type="number"], input[type="date"], select { width:100%; padding:6px; box-sizing:border-box; }
+    .fte-box { border:1px solid #ddd; border-radius:10px; padding:10px; margin-top:10px; background:#fafafa; }
+    .fte-row { display:grid; grid-template-columns: 1fr 1fr 110px 80px; gap:8px; align-items:end; margin-bottom:8px; }
+    .btn-mini { padding: 6px 10px; border-radius: 6px; border:none; cursor:pointer; }
+    .btn-mini-del { background:#dc3545; color:#fff; }
+    .btn-mini-add { background:#6c757d; color:#fff; }
+  </style>
+</head>
+<body>
+
+  <h1>Interactive Roadmap</h1>
+
+  <!-- PLAN MANAGEMENT -->
+  <h3>Plans</h3>
+
+  <div style="margin-bottom:10px;">
+    <label style="font-weight:bold;">Active plan (for editing):</label><br>
+    <select id="planSelect" style="padding:6px; min-width:260px;"></select>
+    <button class="btn btn-save" onclick="savePlanAs()">Save as New Plan</button>
+    <button class="btn btn-deleteplan" onclick="deletePlan()">Delete Plan</button>
+  </div>
+
+  <div style="margin-bottom:10px;">
+    <label style="font-weight:bold;">Plans shown in Gantt:</label><br>
+    <select id="ganttPlansSelect" multiple size="5" style="padding:6px; min-width:260px;"></select>
+  </div>
+
+  <div style="margin-bottom:16px;">
+    <label style="font-weight:bold;">
+      <input type="checkbox" id="showDatesOnBars" onchange="toggleShowDates(this)">
+      Show dates on bars
+    </label>
+  </div>
+
+  <button class="btn btn-export" onclick="exportJSON()">Export JSON</button>
+  <button class="btn btn-import" onclick="document.getElementById('importFile').click()">Import JSON</button>
+  <input id="importFile" type="file" accept="application/json" style="display:none" onchange="importJSON(event)">
+
+  <hr><br>
+
+  <label><strong>Project Start Date:</strong></label><br>
+  <input type="date" id="projectStartInput" style="padding:6px;margin-bottom:20px">
+  <p class="muted" style="margin-top:-14px">
+    Note: each activity can also have its own <b>Manual Start</b> (can override dependencies) and <b>Target End</b>.
+    Duration is treated as <b>effort in person-days</b>. Variable FTE windows change the finish date.
+  </p>
+
+  <div id="activities"></div>
+
+  <button class="btn btn-add" onclick="addActivity()">Add Activity</button>
+
+  <h2>Gantt Chart</h2>
+  <div id="gantt"></div>
+
+  <h2>Critical Path (latest finish across selected plans)</h2>
+  <div id="critical"></div>
+
+<script>
+  /*********************************
+   *       GLOBAL STATE & COLORS   *
+   *********************************/
+  const PLAN_COLORS = [
+    "#007bff", "#28a745", "#6f42c1", "#fd7e14",
+    "#20c997", "#e83e8c", "#6610f2", "#ffc107"
+  ];
+
+  let showDatesOnBars = false;
+
+  let plans = JSON.parse(localStorage.getItem("roadmapPlans") || "[]");
+
+  let isNewPlan = plans.length === 0;
+  let currentPlanIndex = plans.length > 0 ? 0 : null;
+
+  let projectStart = plans.length > 0
+    ? new Date(plans[0].projectStart)
+    : new Date();
+
+  let activities = plans.length > 0
+    ? plans[0].activities
+    : [];
+
+  let ganttPlanIndexes = plans.map((_, i) => i);
+
+  document.getElementById("projectStartInput").value =
+    normalizeDate(projectStart).toISOString().split("T")[0];
+
+  /*********************************
+   *      DATA COMPATIBILITY       *
+   *********************************/
+  function ensureActivityDefaults(a) {
+    if (!a) a = {};
+    if (typeof a.name !== "string") a.name = "";
+    if (typeof a.duration !== "number") a.duration = Number(a.duration || 0); // effort (person-days)
+    if (!isFinite(a.duration)) a.duration = 0;
+
+    if (typeof a.people !== "number") a.people = Number(a.people || 1); // default FTE fallback
+    if (!isFinite(a.people) || a.people <= 0) a.people = 1;
+
+    if (!Array.isArray(a.dependsOn)) a.dependsOn = [];
+
+    // New fields:
+    if (typeof a.earliestStart !== "string") a.earliestStart = ""; // YYYY-MM-DD
+    if (typeof a.targetEnd !== "string") a.targetEnd = ""; // YYYY-MM-DD
+
+    if (!Array.isArray(a.fteWindows)) a.fteWindows = []; // [{startDate,endDate,fte}]
+    a.fteWindows = a.fteWindows.map(w => ({
+      startDate: (w && typeof w.startDate === "string") ? w.startDate : "",
+      endDate: (w && typeof w.endDate === "string") ? w.endDate : "",
+      fte: (w && isFinite(Number(w.fte))) ? Number(w.fte) : 0
+    }));
+
+    return a;
+  }
+
+  function ensurePlansDefaults() {
+    plans = (plans || []).map(p => {
+      const out = { ...p };
+      if (!out.name) out.name = "Unnamed Plan";
+      if (!out.projectStart) out.projectStart = new Date().toISOString();
+      if (!Array.isArray(out.activities)) out.activities = [];
+      out.activities = out.activities.map(ensureActivityDefaults);
+      return out;
+    });
+  }
+  ensurePlansDefaults();
+  activities = (activities || []).map(ensureActivityDefaults);
+
+  /*********************************
+   *    LOADING & PLAN MANAGEMENT  *
+   *********************************/
+  function savePlans() {
+    localStorage.setItem("roadmapPlans", JSON.stringify(plans));
+  }
+
+  function refreshGanttPlansSelect() {
+    const sel = document.getElementById("ganttPlansSelect");
+    sel.innerHTML = "";
+
+    if (plans.length === 0) {
+      sel.disabled = true;
+      return;
+    }
+
+    sel.disabled = false;
+
+    if (!ganttPlanIndexes || !ganttPlanIndexes.length) {
+      ganttPlanIndexes = plans.map((_, i) => i);
+    }
+
+    plans.forEach((p, i) => {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = p.name;
+      if (ganttPlanIndexes.includes(i)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function refreshPlanSelect() {
+    const select = document.getElementById("planSelect");
+    select.innerHTML = `
+      <option value="new">My New Plan</option>
+      ${plans.map((p, i) => `<option value="${i}">${p.name}</option>`).join("")}
+    `;
+    select.value = isNewPlan ? "new" : currentPlanIndex;
+    refreshGanttPlansSelect();
+  }
+
+  document.getElementById("planSelect").onchange = (e) => {
+    if (e.target.value === "new") {
+      startNewPlan();
+    } else {
+      loadPlan(Number(e.target.value));
+    }
+  };
+
+  document.getElementById("ganttPlansSelect").onchange = (e) => {
+    const sel = e.target;
+    ganttPlanIndexes = Array.from(sel.selectedOptions).map(o => Number(o.value));
+    render();
+  };
+
+  function toggleShowDates(cb) {
+    showDatesOnBars = cb.checked;
+    render();
+  }
+
+  function startNewPlan() {
+    // If there is an active plan, clone its activities
+    let cloned = [];
+
+    if (!isNewPlan && currentPlanIndex !== null && plans[currentPlanIndex]) {
+      cloned = JSON.parse(JSON.stringify(plans[currentPlanIndex].activities));
+    } else if (activities.length > 0) {
+      cloned = JSON.parse(JSON.stringify(activities));
+    }
+
+    isNewPlan = true;
+    currentPlanIndex = null;
+
+    projectStart = new Date();
+    document.getElementById("projectStartInput").value =
+      normalizeDate(projectStart).toISOString().split("T")[0];
+
+    activities = (cloned.length ? cloned : []).map(ensureActivityDefaults);
+    render();
+  }
+
+  function loadPlan(index) {
+    isNewPlan = false;
+    currentPlanIndex = index;
+    projectStart = new Date(plans[index].projectStart);
+    activities = (plans[index].activities || []).map(ensureActivityDefaults);
+    document.getElementById("projectStartInput").value =
+      normalizeDate(projectStart).toISOString().split("T")[0];
+    render();
+  }
+
+  // NEW PLAN = CLONE OF CURRENT PLAN
+  function savePlanAs() {
+    const name = prompt("Enter the name of the new plan:");
+    if (!name) return;
+
+    const clonedActivities = JSON.parse(JSON.stringify(activities)).map(ensureActivityDefaults);
+
+    plans.push({
+      name,
+      projectStart: normalizeDate(projectStart).toISOString(),
+      activities: clonedActivities
+    });
+
+    isNewPlan = false;
+    currentPlanIndex = plans.length - 1;
+    savePlans();
+
+    ganttPlanIndexes = plans.map((_, i) => i);
+    refreshPlanSelect();
+    render();
+  }
+
+  function deletePlan() {
+    if (isNewPlan || currentPlanIndex === null) {
+      alert("This plan is not saved.");
+      return;
+    }
+    if (!confirm("Do you really want to delete this plan?")) return;
+    plans.splice(currentPlanIndex, 1);
+    savePlans();
+    ganttPlanIndexes = plans.map((_, i) => i);
+    startNewPlan();
+    refreshPlanSelect();
+  }
+
+  /*********************************
+   *            DATES              *
+   *********************************/
+  function isWeekend(d) {
+    const day = d.getDay();
+    return day === 0 || day === 6;
+  }
+
+  function normalizeDate(d) {
+    // Keep date-only semantics (avoid time zone drift)
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+
+  // Supports negative values (go back in time)
+  function addWorkingDaysSigned(baseDate, days) {
+    let result = normalizeDate(baseDate);
+    if (!isFinite(days) || days === 0) return result;
+
+    const dir = days > 0 ? 1 : -1;
+    let remaining = Math.abs(Math.trunc(days));
+
+    while (remaining > 0) {
+      result.setDate(result.getDate() + dir);
+      if (!isWeekend(result)) remaining--;
+    }
+    return result;
+  }
+
+  // Count working days between two boundaries (dateTo - dateFrom), ignoring weekends.
+  // If dateTo <= dateFrom => 0.
+  function workingDaysBetween(dateFrom, dateTo) {
+    let from = normalizeDate(dateFrom);
+    let to = normalizeDate(dateTo);
+    if (to <= from) return 0;
+
+    let count = 0;
+    let cursor = new Date(from);
+    while (cursor < to) {
+      cursor.setDate(cursor.getDate() + 1);
+      if (!isWeekend(cursor) && cursor <= to) count++;
+    }
+    return count;
+  }
+
+  function workingDaysBetweenSigned(dateFrom, dateTo) {
+    const from = normalizeDate(dateFrom);
+    const to = normalizeDate(dateTo);
+    if (to >= from) return workingDaysBetween(from, to);
+    return -workingDaysBetween(to, from);
+  }
+
+  function maxDate(dates) {
+    if (!dates.length) return null;
+    return new Date(Math.max(...dates.map(d => normalizeDate(d).getTime())));
+  }
+
+  function safeParseDate(yyyy_mm_dd) {
+    if (!yyyy_mm_dd) return null;
+    const d = new Date(yyyy_mm_dd);
+    if (isNaN(d.getTime())) return null;
+    return normalizeDate(d);
+  }
+
+  /*********************************
+   *      FTE WINDOW LOGIC         *
+   *********************************/
+  function getFTEForWorkDay(activity, workDayDate) {
+    const fallback = Math.max(0, Number(activity.people || 0)) || 0;
+    const wins = Array.isArray(activity.fteWindows) ? activity.fteWindows : [];
+    if (!wins.length) return fallback;
+
+    const day = normalizeDate(workDayDate).getTime();
+    let chosen = null;
+
+    // If overlaps exist, last match wins (so you can override by putting a later row)
+    wins.forEach(w => {
+      if (!w || !w.startDate || !w.endDate) return;
+      const s = safeParseDate(w.startDate);
+      const e = safeParseDate(w.endDate);
+      if (!s || !e) return;
+
+      const st = s.getTime();
+      const en = e.getTime();
+      if (day >= st && day <= en) chosen = w;
+    });
+
+    return chosen ? Math.max(0, Number(chosen.fte || 0)) : fallback;
+  }
+
+  // duration is treated as effort in person-days
+  function simulateEndBoundary(startBoundary, activity) {
+    const effort = Math.max(0, Number(activity.duration || 0));
+    let remaining = effort;
+
+    let end = normalizeDate(startBoundary);
+
+    if (remaining <= 0) return end;
+
+    // Safety: prevent infinite loops if FTE is always 0
+    let safety = 0;
+    const MAX_STEPS = 20000;
+
+    while (remaining > 0 && safety < MAX_STEPS) {
+      end.setDate(end.getDate() + 1);
+      if (isWeekend(end)) { safety++; continue; }
+
+      const fte = getFTEForWorkDay(activity, end);
+      if (fte > 0) remaining -= fte;
+
+      safety++;
+    }
+
+    return end;
+  }
+
+  /*********************************
+   *       SCHEDULING LOGIC        *
+   *********************************/
+  function buildSchedule(activityList, planStartDate) {
+    const base = normalizeDate(planStartDate);
+    const schedule = [];
+
+    (activityList || []).forEach((raw, i) => {
+      const a = ensureActivityDefaults(raw);
+
+      // Dependency end boundary = max of dependency end boundaries
+      const depEnds = (a.dependsOn && a.dependsOn.length)
+        ? a.dependsOn
+            .filter(d => d >= 0 && d < schedule.length)
+            .map(d => schedule[d].endBoundary)
+        : [];
+
+      const depEndBoundary = depEnds.length ? maxDate(depEnds) : base;
+
+      // If Manual Start is set, it overrides dependency timing (but not project start).
+      const manualStart = safeParseDate(a.earliestStart);
+      let startBoundary;
+      if (manualStart) {
+        startBoundary = maxDate([base, manualStart]) || base;
+      } else {
+        startBoundary = maxDate([base, depEndBoundary]) || base;
+      }
+
+      const endBoundary = simulateEndBoundary(startBoundary, a);
+
+      const targetEnd = safeParseDate(a.targetEnd);
+      const meetsTarget = targetEnd ? (endBoundary.getTime() <= targetEnd.getTime()) : null;
+
+      schedule.push({
+        ...a,
+        index: i,
+        startBoundary,
+        endBoundary,
+        targetEnd,
+        meetsTarget,
+        calendarStart: startBoundary.toLocaleDateString("en-US"),
+        calendarEnd: endBoundary.toLocaleDateString("en-US")
+      });
+    });
+
+    return schedule;
+  }
+
+  /*********************************
+   *         DATE CHANGE           *
+   *********************************/
+  document.getElementById("projectStartInput").onchange = (e) => {
+    projectStart = new Date(e.target.value);
+    if (!isNewPlan && currentPlanIndex !== null) {
+      plans[currentPlanIndex].projectStart = normalizeDate(projectStart).toISOString();
+      savePlans();
+    }
+    render();
+  };
+
+  /*********************************
+   *          RENDER UI            *
+   *********************************/
+  function render() {
+    // sync active plan back to plans[]
+    if (!isNewPlan && currentPlanIndex !== null) {
+      plans[currentPlanIndex].activities = activities.map(ensureActivityDefaults);
+      plans[currentPlanIndex].projectStart = normalizeDate(projectStart).toISOString();
+      savePlans();
+    }
+
+    refreshPlanSelect();
+
+    const activeSchedule = buildSchedule(activities, projectStart);
+
+    let container = document.getElementById("activities");
+    container.innerHTML = "";
+
+    // ACTIVITY CARDS (active plan only)
+    activeSchedule.forEach((s, i) => {
+      let card = document.createElement("div");
+      card.className = "card draggable";
+      card.draggable = true;
+
+      card.ondragstart = e => e.dataTransfer.setData("index", i);
+      card.ondragover = e => e.preventDefault();
+      card.ondrop = e => {
+        let from = Number(e.dataTransfer.getData("index"));
+        let moved = activities.splice(from, 1)[0];
+        activities.splice(i, 0, moved);
+
+        // Fix dependencies indices after reorder: simple approach is to remap by names is hard.
+        // To keep existing behavior, we do NOT remap dependency indices (same as original).
+        // Users can adjust dependencies if reordering breaks them.
+        render();
+      };
+
+      const statusPill = (s.meetsTarget === null)
+        ? ""
+        : (s.meetsTarget
+            ? `<span class="pill pill-ok">On / before target</span>`
+            : `<span class="pill pill-bad">After target</span>`);
+
+      card.innerHTML = `
+        <input style="width:100%;padding:8px" value="${escapeHtml(s.name)}"
+          onchange="update(${i},'name', this.value)" placeholder="Activity / area name" />
+
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px">
+          <div class="field">
+            <label>Effort (person-days)</label>
+            <input type="number" min="0" step="0.5" value="${s.duration}"
+              onchange="update(${i},'duration', Number(this.value))" />
+            <div class="muted">Example: 10 = 1 FTE for 10 working days (or 2 FTE for 5).</div>
+          </div>
+
+          <div class="field">
+            <label>Default FTE (fallback)</label>
+            <input type="number" min="0" step="0.5" value="${s.people}"
+              onchange="update(${i},'people', Number(this.value))" />
+            <div class="muted">Used on days not covered by an FTE window.</div>
+          </div>
+
+          <div class="field">
+            <label>Dependencies</label>
+            <select multiple size="4" onchange="changeDeps(${i}, this)" style="width:100%">
+              ${activities.map((x, idx) =>
+                idx !== i
+                  ? `<option value="${idx}" ${s.dependsOn && s.dependsOn.includes(idx) ? "selected" : ""}>
+                      ${escapeHtml(x.name || "Activity " + (idx + 1))}
+                     </option>`
+                  : ""
+              ).join("")}
+            </select>
+          </div>
+        </div>
+
+        <div class="smallgrid">
+          <div class="field">
+            <label>Manual Start (optional)</label>
+            <input type="date" value="${s.earliestStart || ""}"
+              onchange="update(${i},'earliestStart', this.value)" />
+            <div class="muted">If set, this activity starts on this date even if its dependencies end later. (Still not before project start.)</div>
+          </div>
+
+          <div class="field">
+            <label>Target End (optional)</label>
+            <input type="date" value="${s.targetEnd || ""}"
+              onchange="update(${i},'targetEnd', this.value)" />
+            <div class="muted">Used to check if you're meeting expectations. ${statusPill}</div>
+          </div>
+        </div>
+
+        <p style="margin:10px 0 0 0">
+          <strong>Planned Start:</strong> ${s.calendarStart} &nbsp;
+          <strong>Planned End:</strong> ${s.calendarEnd}
+          ${statusPill}
+        </p>
+
+        <div class="fte-box">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+            <div>
+              <b>FTE windows (optional)</b>
+              <div class="muted">Define when 2+ FTE can work on this area, and when they drop. If windows overlap, the last matching row wins.</div>
+            </div>
+            <button class="btn-mini btn-mini-add" onclick="addFTEWindow(${i})">Add window</button>
+          </div>
+
+          <div style="margin-top:10px">
+            ${(s.fteWindows && s.fteWindows.length) ? s.fteWindows.map((w, wi) => `
+              <div class="fte-row">
+                <div class="field">
+                  <label>From</label>
+                  <input type="date" value="${w.startDate || ""}" onchange="updateFTEWindow(${i},${wi},'startDate', this.value)" />
+                </div>
+                <div class="field">
+                  <label>To</label>
+                  <input type="date" value="${w.endDate || ""}" onchange="updateFTEWindow(${i},${wi},'endDate', this.value)" />
+                </div>
+                <div class="field">
+                  <label>FTE</label>
+                  <input type="number" min="0" step="0.5" value="${isFinite(Number(w.fte)) ? Number(w.fte) : 0}"
+                    onchange="updateFTEWindow(${i},${wi},'fte', Number(this.value))" />
+                </div>
+                <div>
+                  <button class="btn-mini btn-mini-del" onclick="removeFTEWindow(${i},${wi})">Remove</button>
+                </div>
+              </div>
+            `).join("") : `<div class="muted">No windows set. Using Default FTE.</div>`}
+          </div>
+        </div>
+
+        <div style="text-align:right; margin-top:12px">
+          <button class="btn btn-dup" onclick="duplicateActivity(${i})">Duplicate</button>
+          <button class="btn btn-del" onclick="removeActivity(${i})">Delete</button>
+        </div>
+      `;
+
+      container.appendChild(card);
+    });
+
+    /*********************************
+     *           GANTT              *
+     *********************************/
+    const gantt = document.getElementById("gantt");
+    const criticalDiv = document.getElementById("critical");
+    gantt.innerHTML = "";
+    criticalDiv.innerHTML = "";
+
+    // Build displayed plans (saved plans) OR fallback to active plan only
+    let selectedPlans = [];
+
+    if (plans.length === 0) {
+      selectedPlans = [{
+        planIndex: -1,
+        name: "Current plan",
+        color: PLAN_COLORS[0],
+        projectStart: normalizeDate(projectStart),
+        schedule: activeSchedule
+      }];
+    } else {
+      if (!ganttPlanIndexes || !ganttPlanIndexes.length) {
+        ganttPlanIndexes = plans.map((_, i) => i);
+      }
+
+      selectedPlans = ganttPlanIndexes
+        .map((idx, colorIdx) => {
+          const pl = plans[idx];
+          const base = new Date(pl.projectStart);
+          const sch = buildSchedule(pl.activities || [], base);
+          return {
+            planIndex: idx,
+            name: pl.name,
+            color: PLAN_COLORS[colorIdx % PLAN_COLORS.length],
+            projectStart: normalizeDate(base),
+            schedule: sch
+          };
+        })
+        .filter(ps => ps.schedule.length > 0);
+    }
+
+    if (!selectedPlans.length) {
+      gantt.innerHTML = "<p>No plans selected for Gantt (or no activities).</p>";
+      criticalDiv.innerHTML = "<p>No critical path (no activities).</p>";
+      return;
+    }
+
+    // GLOBAL ORIGIN = earliest boundary among selected plans (plan start or any activity start)
+    let globalOrigin = selectedPlans[0].projectStart;
+    selectedPlans.forEach(ps => {
+      if (ps.projectStart < globalOrigin) globalOrigin = ps.projectStart;
+      ps.schedule.forEach(s => {
+        if (s.startBoundary < globalOrigin) globalOrigin = s.startBoundary;
+      });
+    });
+
+    // Compute absStart/absEnd (working-day units) on common axis
+    selectedPlans.forEach(ps => {
+      ps.schedule = ps.schedule.map(item => ({
+        ...item,
+        absStart: workingDaysBetweenSigned(globalOrigin, item.startBoundary),
+        absEnd: workingDaysBetweenSigned(globalOrigin, item.endBoundary)
+      }));
+    });
+
+    // Axis span
+    let minAbs = Infinity;
+    let maxAbs = -Infinity;
+    selectedPlans.forEach(ps => {
+      ps.schedule.forEach(s => {
+        if (s.absStart < minAbs) minAbs = s.absStart;
+        if (s.absEnd > maxAbs) maxAbs = s.absEnd;
+      });
+    });
+    if (!isFinite(minAbs)) minAbs = 0;
+    if (!isFinite(maxAbs)) maxAbs = 1;
+    const spanAbs = Math.max(1e-9, maxAbs - minAbs);
+
+    // Determine global critical (latest absEnd across all selected plans)
+    let globalMaxAbsEnd = -Infinity;
+    let globalCritical = []; // {ps, s}
+    selectedPlans.forEach(ps => {
+      ps.schedule.forEach(s => {
+        if (s.absEnd > globalMaxAbsEnd) {
+          globalMaxAbsEnd = s.absEnd;
+          globalCritical = [{ ps, s }];
+        } else if (s.absEnd === globalMaxAbsEnd) {
+          globalCritical.push({ ps, s });
+        }
+      });
+    });
+
+    const maxActivities = Math.max(...selectedPlans.map(ps => ps.schedule.length), 0);
+
+    // Render each activity row once, overlay bars for selected plans
+    for (let i = 0; i < maxActivities; i++) {
+      const block = document.createElement("div");
+      block.style.marginBottom = "10px";
+
+      const baseName =
+        (selectedPlans[0].schedule[i] && selectedPlans[0].schedule[i].name) ||
+        ("Activity " + (i + 1));
+
+      const title = document.createElement("p");
+      title.style.margin = "4px 0";
+      title.style.fontWeight = "bold";
+      title.textContent = baseName;
+      block.appendChild(title);
+
+      const bg = document.createElement("div");
+      bg.className = "gantt-bg";
+
+      selectedPlans.forEach(ps => {
+        const s = ps.schedule[i];
+        if (!s) return;
+
+        const leftPct = ((s.absStart - minAbs) / spanAbs) * 100;
+        const widthPct = Math.max(0.2, ((s.absEnd - s.absStart) / spanAbs) * 100); // min visible width
+
+        const bar = document.createElement("div");
+        bar.className = "gantt-bar";
+        bar.style.backgroundColor = ps.color;
+        bar.style.opacity = "0.82";
+        bar.style.color = "#fff";
+        bar.style.position = "absolute";
+        bar.style.left = leftPct + "%";
+        bar.style.width = widthPct + "%";
+        bar.style.whiteSpace = "nowrap";
+        bar.style.overflow = "hidden";
+        bar.style.textOverflow = "ellipsis";
+        bar.style.fontSize = "11px";
+
+        // Highlight global critical activity bar(s)
+        const isGlobalCritical = (s.absEnd === globalMaxAbsEnd);
+        if (isGlobalCritical) {
+          bar.classList.add("critical-outline");
+        }
+
+        let label = ps.name;
+        if (showDatesOnBars) {
+          label += " · " + s.calendarStart + " – " + s.calendarEnd;
+        }
+        bar.textContent = label;
+
+        bg.appendChild(bar);
+      });
+
+      block.appendChild(bg);
+      gantt.appendChild(block);
+    }
+
+    if (globalCritical.length && globalMaxAbsEnd > -Infinity) {
+      criticalDiv.innerHTML = globalCritical.map(({ ps, s }) => {
+        return `<p style="color:${ps.color};font-weight:bold">
+          Latest finish: <span style="color:#000">${escapeHtml(ps.name)}</span> — activity <span style="color:#000">${escapeHtml(s.name)}</span> ends on ${s.calendarEnd}
+        </p>`;
+      }).join("");
+    } else {
+      criticalDiv.innerHTML = "<p>No critical path (no activities).</p>";
+    }
+  }
+
+  /*********************************
+   *         HELPER FUNCTIONS      *
+   *********************************/
+  function escapeHtml(str) {
+    return String(str || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function update(i, field, value) {
+    activities[i] = ensureActivityDefaults(activities[i]);
+    activities[i][field] = value;
+    render();
+  }
+
+  function changeDeps(i, select) {
+    activities[i] = ensureActivityDefaults(activities[i]);
+    activities[i].dependsOn = Array.from(select.selectedOptions).map(o => Number(o.value));
+    render();
+  }
+
+  function addActivity() {
+    activities.push(ensureActivityDefaults({
+      name: "",
+      duration: 0,      // effort person-days
+      people: 1,        // default FTE
+      dependsOn: [],
+      earliestStart: "",
+      targetEnd: "",
+      fteWindows: []
+    }));
+    render();
+  }
+
+  function removeActivity(i) {
+    activities.splice(i, 1);
+    activities.forEach(a => {
+      a.dependsOn = (a.dependsOn || [])
+        .filter(d => d !== i)
+        .map(d => (d > i ? d - 1 : d));
+    });
+    render();
+  }
+
+  function duplicateActivity(i) {
+    const copy = JSON.parse(JSON.stringify(activities[i]));
+    activities.push(ensureActivityDefaults(copy));
+    render();
+  }
+
+  function addFTEWindow(activityIndex) {
+    activities[activityIndex] = ensureActivityDefaults(activities[activityIndex]);
+    activities[activityIndex].fteWindows.push({ startDate: "", endDate: "", fte: activities[activityIndex].people || 1 });
+    render();
+  }
+
+  function updateFTEWindow(activityIndex, windowIndex, field, value) {
+    activities[activityIndex] = ensureActivityDefaults(activities[activityIndex]);
+    const wins = activities[activityIndex].fteWindows;
+    if (!wins[windowIndex]) wins[windowIndex] = { startDate: "", endDate: "", fte: 0 };
+    wins[windowIndex][field] = value;
+    render();
+  }
+
+  function removeFTEWindow(activityIndex, windowIndex) {
+    activities[activityIndex] = ensureActivityDefaults(activities[activityIndex]);
+    activities[activityIndex].fteWindows.splice(windowIndex, 1);
+    render();
+  }
+
+  /*********************************
+   *          EXPORT JSON          *
+   *********************************/
+  function exportJSON() {
+    // Keep backward compatibility (old consumers can ignore new fields)
+    const dataStr = JSON.stringify(plans, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "roadmap_plans.json";
+    a.click();
+
+    URL.revokeObjectURL(url);
+  }
+
+  /*********************************
+   *          IMPORT JSON          *
+   *********************************/
+  function importJSON(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+
+    reader.onload = function(e) {
+      try {
+        plans = JSON.parse(e.target.result) || [];
+        ensurePlansDefaults();
+        savePlans();
+
+        if (plans.length) {
+          isNewPlan = false;
+          currentPlanIndex = 0;
+          projectStart = new Date(plans[0].projectStart);
+          activities = (plans[0].activities || []).map(ensureActivityDefaults);
+          ganttPlanIndexes = plans.map((_, i) => i);
+        } else {
+          isNewPlan = true;
+          currentPlanIndex = null;
+          projectStart = new Date();
+          activities = [];
+          ganttPlanIndexes = [];
+        }
+        render();
+        alert("Plans imported successfully!");
+      } catch (err) {
+        alert("Invalid JSON file.");
+      }
+    };
+
+    reader.readAsText(file);
+  }
+
+  /*********************************
+   *          INITIALIZE           *
+   *********************************/
+  refreshPlanSelect();
+  if (plans.length > 0) {
+    render();
+  } else {
+    startNewPlan();
+  }
+</script>
+
+</body>
+</html>
