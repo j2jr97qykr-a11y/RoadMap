@@ -1,6 +1,6 @@
 {
-  "name": "Compensation Planner",
-  "short_name": "CompPlan",
+  "name": "RoadMap",
+  "short_name": "RoadMap",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0b1020",
